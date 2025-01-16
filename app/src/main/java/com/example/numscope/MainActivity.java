@@ -3,29 +3,29 @@ package com.example.numscope;
 import android.Manifest;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.os.Bundle;
 import android.text.InputType;
 import android.util.SparseArray;
-import android.view.Menu;
-import android.view.MenuItem;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.widget.Button;
 import android.widget.EditText;
-import android.widget.LinearLayout;
 import android.widget.TextView;
+import android.widget.Toast;
 import androidx.annotation.NonNull;
-import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
-
-import com.example.numscope.R;
 import com.google.android.gms.vision.CameraSource;
 import com.google.android.gms.vision.Detector;
 import com.google.android.gms.vision.Frame;
-import com.google.android.gms.vision.text.TextBlock;  // Import TextBlock
+import com.google.android.gms.vision.text.TextBlock;
 import com.google.android.gms.vision.text.TextRecognizer;
+
 import java.io.IOException;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class MainActivity extends AppCompatActivity {
 
@@ -33,33 +33,73 @@ public class MainActivity extends AppCompatActivity {
     private CameraSource cameraSource;
     private TextView resultView;
     private EditText numberInput;
+    private Button captureButton;
     private static final int CAMERA_PERMISSION_CODE = 100;
+    private boolean processingImage = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        initializeViews();
+        setupInputHandling();
+        checkCameraPermission();
+    }
+
+    private void initializeViews() {
         cameraView = findViewById(R.id.camera_view);
         resultView = findViewById(R.id.result_view);
         numberInput = findViewById(R.id.number_input);
-
+        captureButton = findViewById(R.id.capture_button);
         numberInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+    }
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.CAMERA}, CAMERA_PERMISSION_CODE);
+    private void setupInputHandling() {
+        captureButton.setOnClickListener(v -> captureImage());
+
+        numberInput.setOnEditorActionListener((v, actionId, event) -> {
+            processInputNumber();
+            return true;
+        });
+    }
+
+    private void processInputNumber() {
+        String input = numberInput.getText().toString().trim();
+        if (!input.isEmpty()) {
+            try {
+                int number = Integer.parseInt(input);
+                resultView.setText(NumberUtils.analyzeNumber(number));
+            } catch (NumberFormatException e) {
+                Toast.makeText(this, "Invalid number format", Toast.LENGTH_SHORT).show();
+            }
+        }
+    }
+
+    private void checkCameraPermission() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
+                != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(
+                    this,
+                    new String[]{Manifest.permission.CAMERA},
+                    CAMERA_PERMISSION_CODE
+            );
         } else {
             startCameraSource();
         }
+    }
 
-        numberInput.setOnEditorActionListener((v, actionId, event) -> {
-            String input = numberInput.getText().toString();
-            if (!input.isEmpty()) {
-                int number = Integer.parseInt(input);
-                resultView.setText(checkNumberProperties(number));
+    @Override
+    public void onRequestPermissionsResult(int requestCode, @NonNull String[] permissions,
+                                           @NonNull int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == CAMERA_PERMISSION_CODE) {
+            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+                startCameraSource();
+            } else {
+                Toast.makeText(this, "Camera permission is required", Toast.LENGTH_LONG).show();
             }
-            return false;
-        });
+        }
     }
 
     private void startCameraSource() {
@@ -69,9 +109,15 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        setupCamera(textRecognizer);
+        setupTextRecognizer(textRecognizer);
+    }
+
+    private void setupCamera(TextRecognizer textRecognizer) {
         cameraSource = new CameraSource.Builder(this, textRecognizer)
                 .setFacing(CameraSource.CAMERA_FACING_BACK)
-                .setRequestedPreviewSize(640, 480)
+                .setRequestedPreviewSize(1280, 720)
+                .setRequestedFps(30.0f)
                 .setAutoFocusEnabled(true)
                 .build();
 
@@ -79,7 +125,8 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
                 try {
-                    if (ActivityCompat.checkSelfPermission(MainActivity.this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                    if (ActivityCompat.checkSelfPermission(MainActivity.this,
+                            Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
                         cameraSource.start(cameraView.getHolder());
                     }
                 } catch (IOException e) {
@@ -95,97 +142,51 @@ public class MainActivity extends AppCompatActivity {
                 cameraSource.stop();
             }
         });
+    }
 
+    private void setupTextRecognizer(TextRecognizer textRecognizer) {
         textRecognizer.setProcessor(new Detector.Processor<TextBlock>() {
             @Override
             public void release() {}
 
             @Override
             public void receiveDetections(Detector.Detections<TextBlock> detections) {
-                // Get detected text as a SparseArray of TextBlocks
-                SparseArray<TextBlock> detectedText = detections.getDetectedItems();
+                if (processingImage) {
+                    final SparseArray<TextBlock> items = detections.getDetectedItems();
+                    if (items.size() > 0) {
+                        StringBuilder detectedText = new StringBuilder();
+                        for (int i = 0; i < items.size(); i++) {
+                            TextBlock item = items.valueAt(i);
+                            detectedText.append(item.getValue()).append("\n");
+                        }
 
-                if (detectedText.size() > 0) {
-                    StringBuilder detectedTextString = new StringBuilder();
+                        String text = detectedText.toString().trim();
+                        // Extract the first number found in the text
+                        Pattern pattern = Pattern.compile("\\d+");
+                        Matcher matcher = pattern.matcher(text);
 
-                    // Loop through the detected text blocks and extract text
-                    for (int i = 0; i < detectedText.size(); i++) {
-                        TextBlock textBlock = detectedText.valueAt(i);  // Get each TextBlock
-                        detectedTextString.append(textBlock.getValue()).append("\n"); // Append text value
+                        runOnUiThread(() -> {
+                            if (matcher.find()) {
+                                String number = matcher.group();
+                                numberInput.setText(number);
+                                processInputNumber();
+                            }
+                            processingImage = false;
+                            captureButton.setEnabled(true);
+                        });
                     }
-
-                    // Update the UI with the recognized text
-                    runOnUiThread(() -> numberInput.setText(detectedTextString.toString()));
                 }
             }
         });
     }
 
-    private String checkNumberProperties(int number) {
-        StringBuilder properties = new StringBuilder();
-
-        if (isArmstrong(number)) properties.append("Armstrong Number\n");
-        if (isHappy(number)) properties.append("Happy Number\n");
-        // Add other checks here
-
-        return properties.toString();
-    }
-
-    private boolean isArmstrong(int number) {
-        int originalNumber = number, result = 0, n = 0;
-        while (originalNumber != 0) {
-            originalNumber /= 10;
-            n++;
+    private void captureImage() {
+        if (!processingImage) {
+            processingImage = true;
+            captureButton.setEnabled(false);
+            // The actual capture and processing will happen in the text recognizer processor
+            Toast.makeText(this, "Processing image...", Toast.LENGTH_SHORT).show();
         }
-        originalNumber = number;
-        while (originalNumber != 0) {
-            int remainder = originalNumber % 10;
-            result += Math.pow(remainder, n);
-            originalNumber /= 10;
-        }
-        return result == number;
-    }
-
-    private boolean isHappy(int number) {
-        int slow, fast;
-        slow = fast = number;
-        do {
-            slow = numSquareSum(slow);
-            fast = numSquareSum(numSquareSum(fast));
-        } while (slow != fast);
-        return slow == 1;
-    }
-
-    private int numSquareSum(int n) {
-        int squareSum = 0;
-        while (n != 0) {
-            squareSum += (n % 10) * (n % 10);
-            n /= 10;
-        }
-        return squareSum;
-    }
-
-    @Override
-    public boolean onCreateOptionsMenu(Menu menu) {
-        getMenuInflater().inflate(R.menu.menu_main, menu);
-        return true;
-    }
-
-    @Override
-    public boolean onOptionsItemSelected(@NonNull MenuItem item) {
-        if (item.getItemId() == R.id.special_numbers_info) {
-            showNumberInfo();
-            return true;
-        }
-        return super.onOptionsItemSelected(item);
-    }
-
-    private void showNumberInfo() {
-        AlertDialog.Builder builder = new AlertDialog.Builder(this);
-        builder.setTitle("Special Numbers");
-        builder.setMessage("List of special numbers and their meanings here.");
-        builder.setPositiveButton("OK", (dialog, which) -> dialog.dismiss());
-        builder.show();
     }
 
     @Override
